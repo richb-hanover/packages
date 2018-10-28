@@ -52,6 +52,50 @@ summarize_pings() {
      }'
 }
 
+# Summarize the contents of the load file to show mean, stddev CPU utilization.
+#   input parameter ($1) file contains CPU load samples from /proc/stat
+
+summarize_load() {
+
+  < $1 awk '
+{
+	tot=0
+	for (f=2;f<=NF;f++) tot+=$f
+	usg = tot - $5
+	if (init_tot[$1]=="") {
+		init_tot[$1]=tot
+		init_usg[$1]=usg
+		cpus[num_cpus++]=$1
+	}
+	if (last_tot[$1]>0) {
+		sum_usg_2[$1] += ((usg-last_usg[$1])/(tot-last_tot[$1]))^2
+	}
+	last_tot[$1]=tot
+	last_usg[$1]=usg
+}
+END {
+	num_samp=(NR/num_cpus-1)
+	printf("CPU Usage: (%% busy as avg / stddev, %d samples)\n", num_samp)
+	for (i=0;i<num_cpus;i++) {
+		c=cpus[i]
+		if (num_samp>0) {
+			avg_usg=(last_usg[c]-init_usg[c])/(last_tot[c]-init_tot[c])
+			std_usg=sqrt(sum_usg_2[c]/num_samp-avg_usg^2)
+            printf("    %5s: %4.1f%% / %4.1f%%\n", c, avg_usg*100, std_usg*100)
+		}
+	}
+}'
+}
+
+# Capture per-CPU load info at 1-second intervals.
+
+sample_load() {
+  while : ; do
+    sleep 1s
+    egrep "^cpu[0-9]+" /proc/stat
+  done
+}
+
 # Print a line of dots as a progress indicator.
 
 print_dots() {
@@ -59,6 +103,15 @@ print_dots() {
     printf "."
     sleep 1s
   done
+}
+
+# Stop the current sample_load() process
+
+kill_load() {
+  # echo "Load: $load_pid"
+  kill -9 $load_pid
+  wait $load_pid 2>/dev/null
+  load_pid=0
 }
 
 # Stop the current print_dots() process
@@ -79,9 +132,10 @@ kill_pings() {
   ping_pid=0
 }
 
-# Stop the current pings and dots, and exit
+# Stop the current load, pings and dots, and exit
 # ping command catches (and handles) first Ctrl-C, so you have to hit it again...
 kill_pings_and_dots_and_exit() {
+  kill_load
   kill_dots
   echo "\nStopped"
   exit 1
@@ -97,6 +151,7 @@ measure_direction() {
   # Create temp files
   PINGFILE=`mktemp /tmp/measurepings.XXXXXX` || exit 1
   SPEEDFILE=`mktemp /tmp/netperfUL.XXXXXX` || exit 1
+  LOADFILE=`mktemp /tmp/measureload.XXXXXX` || exit 1
   DIRECTION=$1
 
   # Start dots
@@ -114,6 +169,11 @@ measure_direction() {
   ping_pid=$!
   # echo "Ping PID: $ping_pid"
   
+  # Start CPU load sampling
+  sample_load > $LOADFILE &
+  load_pid=$!
+  # echo "Load PID: $load_pid"
+
   # Start netperf with the proper direction
   if [ $DIRECTION = "Download" ]; then
     dir="TCP_MAERTS"
@@ -144,14 +204,19 @@ measure_direction() {
   echo " $1: " `awk '{s+=$1} END {print s}' $SPEEDFILE` Mbps
 
   # When netperf completes, stop the dots and the pings
+  kill_load
   kill_pings
   kill_dots
 
   # Summarize the ping data
   summarize_pings $PINGFILE
 
+  # Summarize the load data
+  summarize_load $LOADFILE
+
   rm $PINGFILE
   rm $SPEEDFILE
+  rm $LOADFILE
 }
 
 # ------- Start of the main routine --------
